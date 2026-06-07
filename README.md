@@ -39,23 +39,30 @@ com.exemple.the_shop
 └── notification/
 ```
 
-### Clean Architecture Layers
+### Hexagonal (Ports & Adapters)
 
 Each module follows the same internal structure:
 
 ```
 {module}/
-├── domain/          # Entities, Value Objects, Domain Events, interfaces
-├── application/     # Use cases, commands, queries, event handlers
-├── infrastructure/  # JPA repositories, external clients, event publishers
-└── api/             # Controllers, request/response DTOs
+├── domain/
+│   ├── model/         # Entities & value objects — pure Java, no framework
+│   ├── port/out/      # Outbound ports: interfaces the domain depends on (e.g. repositories)
+│   └── *Exception     # Domain exceptions
+├── application/       # Use cases / services + application DTOs
+└── infrastructure/    # Adapters — the only layer that touches frameworks
+    ├── persistence/   # JPA entities, Spring Data repos, mappers, port implementations
+    ├── security/      # JWT util, authentication filter, Spring Security config
+    └── web/           # Controllers, request DTOs, per-module exception handlers
 ```
 
-**Dependency rule**: the domain knows nothing about the outside world. Infrastructure implements interfaces defined in the domain. The `api` layer calls the `application` layer — never the domain directly.
+**Dependency rule**: the domain knows nothing about the outside world. It defines the ports (interfaces) it needs; the infrastructure provides the adapters that implement them. Controllers (`infrastructure/web`) call the `application` layer — never the domain models directly.
 
-### Why Not Hexagonal?
+Cross-cutting web concerns that aren't tied to a single module (the shared `ApiError` response body, the global exception handler) live in a top-level `common/web` package.
 
-Hexagonal architecture (ports & adapters) is a valid pattern but adds ceremony that obscures intent in a single-team project. The layered approach above enforces the same core constraint — the domain is isolated — with less indirection.
+### Why Hexagonal?
+
+The project initially aimed for a simpler layered approach, but converged on ports & adapters: isolating the domain behind explicit ports keeps Spring (Security, Data JPA, MVC) entirely in the infrastructure layer, and makes each module a self-contained template that's straightforward to replicate. The `user` module is that reference template.
 
 ---
 
@@ -128,7 +135,22 @@ The payment endpoint and the "place order" endpoint accept an `Idempotency-Key` 
 
 ### Phase 1 — Core
 - [x] Project setup (Docker, DB migrations with Flyway, base config)
-- [ ] `user` module: registration, login, JWT
+- [x] `user` module: registration, login, JWT *(code-complete & audité — tests à venir)*
+  - [x] Entités JPA (`UserJpaEntity`, `RefreshTokenJpaEntity`, `Role`)
+  - [x] Repositories JPA (`UserJpaRepository`, `RefreshTokenJpaRepository`)
+  - [x] Ports domaine + modèle (`UserRepository`, `RefreshTokenRepository`, `RefreshToken`, `User`)
+  - [x] Utilitaire JWT (`JwtUtil`, génération + validation HS256) + dépendance `jjwt`
+  - [x] `RefreshTokenService` (issue / rotate / revoke / purge / validate)
+  - [x] Adapters JPA des ports (`RefreshTokenRepositoryImpl`, `UserRepositoryImpl`)
+  - [x] `AuthService` (signup / signin / signout)
+    - **Décidé** : `signup` auto-connecte → retourne `AuthResponse` (access + refresh token).
+    - **Décidé** : DTOs de requête (`SigninRequest`, `SignupRequest`) dans `infrastructure/web/` ; `AuthResponse` dans `application/`.
+  - [x] Configuration Spring Security (`SecurityFilterChain`, stateless, `/auth/**` public)
+  - [x] Filtre JWT (`JwtAuthenticationFilter`)
+  - [x] Gestion d'erreurs (`ApiError` + `@RestControllerAdvice` global + par module) & validation `@Valid` des requêtes
+  - [x] Controllers (`/auth/signup`, `/auth/signin`, `/auth/refresh`, `/auth/logout`)
+  - [ ] Tests (domain + intégration Testcontainers + MockMvc)
+  - _Note : `UserDetailsService` retiré volontairement — `signin` vérifie via `passwordEncoder.matches`. À réintroduire seulement en cas de statuts de compte / multi-providers._
 - [ ] `catalog` module: products, categories, stock
 - [ ] `cart` module: add/remove items, price snapshot, promo rules
 - [ ] `order` module: state machine, place order use case
@@ -165,6 +187,8 @@ The payment endpoint and the "place order" endpoint accept an `Idempotency-Key` 
 # Copy and fill in the environment variables
 cp .env.example .env
 ```
+
+> **JWT_SECRET** — en dev, une valeur par défaut (non sécurisée) permet de lancer l'app sans rien configurer. En **prod, `JWT_SECRET` est obligatoire** (≥ 32 caractères) et le démarrage échoue s'il est absent. Génère-le avec `openssl rand -base64 48`.
 
 ### Start infrastructure (PostgreSQL, Redis, pgAdmin)
 
