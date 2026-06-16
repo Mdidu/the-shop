@@ -152,6 +152,26 @@ The payment endpoint and the "place order" endpoint accept an `Idempotency-Key` 
   - [ ] Tests (domain + intégration Testcontainers + MockMvc)
   - _Note : `UserDetailsService` retiré volontairement — `signin` vérifie via `passwordEncoder.matches`. À réintroduire seulement en cas de statuts de compte / multi-providers._
 - [ ] `catalog` module: products, categories, stock
+  - **Décidé** : périmètre = CRUD complet produits + catégories + gestion du stock. Le décrément de stock à la commande reste dans le module `order`.
+  - **Décidé** : écriture réservée au rôle `ADMIN` ; lecture publique.
+  - **Décidé** : value object `Money` placé dans un package transverse `shared/` (domaine partagé), distinct de `common/` (transverse web/infra).
+  - Ordre d'attaque (de l'intérieur vers l'extérieur, `Category` avant `Product`) :
+    1. [x] `shared/` → VO `Money` (record immuable, `BigDecimal` mono-devise, factory `of(...)`, montant ≥ 0, échelle 2)
+    2. [x] Domaine `Category` : modèle + VO `Slug` (shared) + enum `ProductStatus` + exceptions (`CategoryNotFoundException`, `SlugAlreadyUsedException` dans shared) + port `CategoryRepository` (`save`/`findById`/`findBySlug`)
+    3. [x] Domaine `Product` + `ProductStock` : deux agrégats distincts, chacun son `version`
+       - [x] Modèle `Product` (factory `create` → `DRAFT`/version 0 ; transitions immuables `activate`/`deactivate` ; édition immuable `updateName`/`updatePrice`/`updateDescription`/`updateCategory` ; nom non vide validé dans le constructeur ; **slug figé au renommage** — pas de recalcul, stabilité SEO/URL)
+       - [x] Modèle `ProductStock` (invariant `quantity >= 0` dans le constructeur ; `productId` fourni par l'appelant ; mouvements `increase`/`decrease` immuables, delta strictement positif, `decrease` lève `InsufficientStockException`)
+       - [x] Exceptions `ProductNotFoundException`, `IllegalProductStatusTransitionException`, `InsufficientStockException`
+       - [x] Ports `ProductRepository` (`save`/`findById`/`findBySlug`/`findAllByCategoryId`) + `ProductStockRepository` (`save`/`findById`/`findByProductId`)
+    4. [x] Persistence : `*JpaEntity` (`@Version`, `@PrePersist/@PreUpdate`), `*JpaRepository`, `*Mapper`, `*RepositoryImpl` — pour `Product` et `ProductStock`. Value objects (`Money`/`Slug`) déballés en primitives par le mapper, jamais exposés à JPA. Migration Flyway `V3__create_catalog.sql` (FK, `UNIQUE`, `CHECK`, index). Compile OK.
+    5. [x] Application : `@Service` `ProductService` + `ProductStockService` + `CategoryService` avec méthodes `@Transactional` (pas de classes `UseCase` dédiées — on suit le gabarit `AuthService`).
+       - **Décidé** : `createProduct` initialise le `ProductStock` (à 0) dans la **même transaction** que le produit.
+       - **Décidé** : la vérif « catégorie existe » vit dans le service (→ `CategoryNotFoundException` métier) ; la FK base est le garde-fou de dernier rideau.
+       - **Décidé** : cycle de vie `DRAFT → ACTIVE ⇄ INACTIVE`, réactivation autorisée, pas de hard delete.
+       - **Décidé** : hiérarchie `Category` = arbre via `parent_id` ; `moveCategory` interdit le self-parent (domaine) et les cycles indirects (`assertNoCycle` remonte les ancêtres dans le service).
+    6. [x] Web : `ProductController` (UN seul controller pour produit + stock, stock adressé par slug) + `CategoryController`, request DTOs `@Valid`, `CatalogExceptionHandler` (par module) + `IllegalArgumentException → 400` ajouté au `GlobalExceptionHandler` (slug d'URL mal formé).
+    7. [ ] **Sécurité (prochaine session)** : règles d'accès `ADMIN` ajoutées au `SecurityConfig` existant (écriture `ADMIN`, lecture publique).
+    8. [ ] **Pagination (prochaine session)** : listings `GET /products` / `GET /categories` paginés (cf. CQRS / projections de lecture).
 - [ ] `cart` module: add/remove items, price snapshot, promo rules
 - [ ] `order` module: state machine, place order use case
 - [ ] `payment` module: simulated capture, idempotency

@@ -6,20 +6,23 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
-import com.exemple.the_shop.common.web.ApiError;
-import com.exemple.the_shop.user.domain.EmailAlreadyUsedException;
-import com.exemple.the_shop.user.domain.InvalidRefreshTokenException;
+import com.exemple.the_shop.shared.web.ApiError;
+import com.exemple.the_shop.user.domain.exception.EmailAlreadyUsedException;
+import com.exemple.the_shop.user.domain.exception.InvalidRefreshTokenException;
 
 /**
  * Mapping HTTP des exceptions <b>métier du module auth</b>.
  *
- * <p>Scopé au package des controllers auth via {@code basePackageClasses} :
- * c'est le gabarit à dupliquer pour chaque module (catalog, cart, orders…),
- * chacun gardant la connaissance de ses propres exceptions. Priorité haute
- * (0) pour passer avant le filet générique de {@code GlobalExceptionHandler}.
+ * <p>
+ * Scopé via {@code basePackageClasses} sur lui-même : le handler vit à la
+ * racine du package {@code web} et couvre tous les sous-packages de controllers
+ * (auth, et les futures features) quel que soit le découpage. C'est le gabarit à
+ * dupliquer pour chaque module (catalog, cart, orders…), chacun gardant la
+ * connaissance de ses propres exceptions. Priorité haute (0) pour passer avant
+ * le filet générique de {@code GlobalExceptionHandler}.
  */
 @Order(0)
-@RestControllerAdvice(basePackageClasses = AuthController.class)
+@RestControllerAdvice(basePackageClasses = AuthExceptionHandler.class)
 public class AuthExceptionHandler {
 
   /** Email déjà enregistré → conflit avec l'état existant. */
