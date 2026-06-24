@@ -1,4 +1,5 @@
 package com.exemple.the_shop.user.infrastructure.persistence.token;
+
 import com.exemple.the_shop.user.infrastructure.persistence.user.UserJpaEntity;
 
 import com.exemple.the_shop.user.domain.model.RefreshToken;
@@ -17,7 +18,7 @@ public final class RefreshTokenMapper {
     entity.setToken(token.getToken());
     entity.setExpiresAt(token.getExpiresAt());
     entity.setRevoked(token.isRevoked());
-    // createdAt géré par @PrePersist
+    entity.setCreatedAt(token.getCreatedAt());
     return entity;
   }
 
@@ -28,7 +29,6 @@ public final class RefreshTokenMapper {
         entity.getToken(),
         entity.getExpiresAt(),
         entity.isRevoked(),
-        entity.getCreatedAt()
-    );
+        entity.getCreatedAt());
   }
 }

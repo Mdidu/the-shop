@@ -13,6 +13,7 @@ public final class CategoryMapper {
     entity.setName(category.getName());
     entity.setSlug(category.getSlug().value());
     entity.setParentId(category.getParentId());
+    entity.setCreatedAt(category.getCreatedAt());
     return entity;
   }
 

@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import com.exemple.the_shop.catalog.domain.exception.CategoryNotFoundException;
 import com.exemple.the_shop.catalog.domain.exception.IllegalCategoryParentException;
+import com.exemple.the_shop.catalog.domain.exception.IllegalProductStatusTransitionException;
 import com.exemple.the_shop.catalog.domain.exception.InsufficientStockException;
 import com.exemple.the_shop.catalog.domain.exception.ProductNotFoundException;
 import com.exemple.the_shop.catalog.domain.exception.StockNotFoundException;
@@ -67,6 +68,14 @@ public class CatalogExceptionHandler {
   /** Parent invalide (self-parent ou cycle) → conflit avec la hiérarchie existante. */
   @ExceptionHandler(IllegalCategoryParentException.class)
   public ResponseEntity<ApiError> handleIllegalParent(IllegalCategoryParentException ex) {
+    return ResponseEntity.status(HttpStatus.CONFLICT)
+        .body(ApiError.of(HttpStatus.CONFLICT, ex.getMessage()));
+  }
+
+  /** Transition de statut interdite (ex. désactiver un produit non activé) → conflit d'état. */
+  @ExceptionHandler(IllegalProductStatusTransitionException.class)
+  public ResponseEntity<ApiError> handleIllegalStatusTransition(
+      IllegalProductStatusTransitionException ex) {
     return ResponseEntity.status(HttpStatus.CONFLICT)
         .body(ApiError.of(HttpStatus.CONFLICT, ex.getMessage()));
   }

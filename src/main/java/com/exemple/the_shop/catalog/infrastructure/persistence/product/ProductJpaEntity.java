@@ -34,7 +34,7 @@ public class ProductJpaEntity {
   @Column(name = "category_id", nullable = false)
   private UUID categoryId;
 
-  @Column(nullable = false, precision = 19, scale = 2)
+  @Column(nullable = false, precision = 10, scale = 2)
   private BigDecimal price;
 
   @Enumerated(EnumType.STRING)
@@ -114,8 +114,16 @@ public class ProductJpaEntity {
     return version;
   }
 
+  public void setVersion(int version) {
+    this.version = version;
+  }
+
   public Instant getCreatedAt() {
     return createdAt;
+  }
+
+  public void setCreatedAt(Instant createdAt) {
+    this.createdAt = createdAt;
   }
 
   public Instant getUpdatedAt() {
@@ -124,7 +132,9 @@ public class ProductJpaEntity {
 
   @PrePersist
   protected void onCreate() {
-    createdAt = Instant.now();
+    if (createdAt == null) {
+      createdAt = Instant.now();
+    }
     updatedAt = Instant.now();
   }
 

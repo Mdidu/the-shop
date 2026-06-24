@@ -9,9 +9,6 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.exemple.the_shop.user.application.auth.AuthResponse;
 import com.exemple.the_shop.user.application.auth.AuthService;
-import com.exemple.the_shop.user.application.token.RefreshTokenService;
-import com.exemple.the_shop.user.domain.model.RefreshToken;
-import com.exemple.the_shop.user.infrastructure.security.JwtUtil;
 
 import jakarta.validation.Valid;
 
@@ -20,13 +17,9 @@ import jakarta.validation.Valid;
 public class AuthController {
 
   private final AuthService authService;
-  private final RefreshTokenService refreshTokenService;
-  private final JwtUtil jwtUtil;
 
-  public AuthController(AuthService authService, RefreshTokenService refreshTokenService, JwtUtil jwtUtil) {
+  public AuthController(AuthService authService) {
     this.authService = authService;
-    this.refreshTokenService = refreshTokenService;
-    this.jwtUtil = jwtUtil;
   }
 
   @PostMapping("/signin")
@@ -50,9 +43,6 @@ public class AuthController {
 
   @PostMapping("/refresh")
   public ResponseEntity<AuthResponse> refreshToken(@RequestBody String refreshToken) {
-    RefreshToken newRefreshToken = refreshTokenService.rotate(refreshToken);
-    String accessToken = jwtUtil.generateAccessToken(jwtUtil.extractUserId(refreshToken),
-        jwtUtil.extractRole(refreshToken));
-    return ResponseEntity.ok().body(new AuthResponse(accessToken, newRefreshToken.getToken()));
+    return ResponseEntity.ok().body(authService.refresh(refreshToken));
   }
 }

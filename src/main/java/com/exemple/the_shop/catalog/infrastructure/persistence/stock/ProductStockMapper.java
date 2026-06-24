@@ -11,6 +11,7 @@ public final class ProductStockMapper {
     entity.setId(productStock.getId());
     entity.setProductId(productStock.getProductId());
     entity.setQuantity(productStock.getQuantity());
+    entity.setVersion(productStock.getVersion());
     return entity;
   }
 

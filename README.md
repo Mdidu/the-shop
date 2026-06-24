@@ -58,7 +58,7 @@ Each module follows the same internal structure:
 
 **Dependency rule**: the domain knows nothing about the outside world. It defines the ports (interfaces) it needs; the infrastructure provides the adapters that implement them. Controllers (`infrastructure/web`) call the `application` layer — never the domain models directly.
 
-Cross-cutting web concerns that aren't tied to a single module (the shared `ApiError` response body, the global exception handler) live in a top-level `common/web` package.
+Cross-cutting concerns that aren't tied to a single module live in a top-level `shared/` package: shared domain (value objects like `Money` and `Slug` in `shared/domain`) and shared web (the `ApiError` response body and the global exception handler in `shared/web`).
 
 ### Why Hexagonal?
 
@@ -112,7 +112,9 @@ Write operations go through rich domain aggregates. Read operations (listings, o
 
 ### Optimistic Locking on Stock
 
-Stock decrements happen at order confirmation. Rather than locking rows, each stock record has a `@Version` field. Concurrent confirmations on the same product will result in one succeeding and others retrying — no deadlocks, predictable behavior under load.
+Stock decrements happen at order confirmation. Rather than locking rows, each stock record has a `@Version` field. On concurrent confirmations of the same product, one write succeeds and the others fail the version check — Hibernate raises `ObjectOptimisticLockingFailureException`, which the API surfaces as a **`409 Conflict`** (no deadlocks, predictable behavior under load). For now the client is responsible for retrying; an automatic server-side retry mechanism will be added later.
+
+> **Implementation note** — because the persistence adapters reconstruct a *detached* entity in the mapper (`new XxxJpaEntity()`) on every `save`, the `@Version` value must be carried explicitly from the domain into the entity (`entity.setVersion(domain.getVersion())`). Otherwise the detached entity always claims version `0`, the merge silently breaks optimistic locking, and the second consecutive update on a row throws `StaleObjectStateException`. The same applies to `created_at` (carried via the mapper, with `@PrePersist` only filling it when null). If a module ever switches to loading-and-mutating the managed entity instead, this manual carrying becomes unnecessary.
 
 ### Idempotency
 
@@ -135,7 +137,8 @@ The payment endpoint and the "place order" endpoint accept an `Idempotency-Key` 
 
 ### Phase 1 — Core
 - [x] Project setup (Docker, DB migrations with Flyway, base config)
-- [x] `user` module: registration, login, JWT *(code-complete & audité — tests à venir)*
+- [x] `user` module: registration, login, JWT *(code-complete, audité & testé manuellement via curl le 2026-06-24 — tests automatisés à venir)*
+  - _Bugs runtime trouvés & corrigés au test manuel : `/auth/refresh` en 500 (refresh token opaque parsé comme un JWT + `created_at` perdu au merge → logique déplacée dans `AuthService.refresh`, mapper corrigé) ; `405` renvoyé en `500` (handler `HttpRequestMethodNotSupportedException` ajouté)._
   - [x] Entités JPA (`UserJpaEntity`, `RefreshTokenJpaEntity`, `Role`)
   - [x] Repositories JPA (`UserJpaRepository`, `RefreshTokenJpaRepository`)
   - [x] Ports domaine + modèle (`UserRepository`, `RefreshTokenRepository`, `RefreshToken`, `User`)
@@ -154,7 +157,7 @@ The payment endpoint and the "place order" endpoint accept an `Idempotency-Key` 
 - [ ] `catalog` module: products, categories, stock
   - **Décidé** : périmètre = CRUD complet produits + catégories + gestion du stock. Le décrément de stock à la commande reste dans le module `order`.
   - **Décidé** : écriture réservée au rôle `ADMIN` ; lecture publique.
-  - **Décidé** : value object `Money` placé dans un package transverse `shared/` (domaine partagé), distinct de `common/` (transverse web/infra).
+  - **Décidé** : value object `Money` placé dans un package transverse `shared/domain` (domaine partagé). Le transverse web (`ApiError`, `GlobalExceptionHandler`) vit dans `shared/web`. _(Le package `common/` initialement envisagé n'a pas été créé : tout le transverse est regroupé sous `shared/`.)_
   - Ordre d'attaque (de l'intérieur vers l'extérieur, `Category` avant `Product`) :
     1. [x] `shared/` → VO `Money` (record immuable, `BigDecimal` mono-devise, factory `of(...)`, montant ≥ 0, échelle 2)
     2. [x] Domaine `Category` : modèle + VO `Slug` (shared) + enum `ProductStatus` + exceptions (`CategoryNotFoundException`, `SlugAlreadyUsedException` dans shared) + port `CategoryRepository` (`save`/`findById`/`findBySlug`)
@@ -170,6 +173,7 @@ The payment endpoint and the "place order" endpoint accept an `Idempotency-Key` 
        - **Décidé** : cycle de vie `DRAFT → ACTIVE ⇄ INACTIVE`, réactivation autorisée, pas de hard delete.
        - **Décidé** : hiérarchie `Category` = arbre via `parent_id` ; `moveCategory` interdit le self-parent (domaine) et les cycles indirects (`assertNoCycle` remonte les ancêtres dans le service).
     6. [x] Web : `ProductController` (UN seul controller pour produit + stock, stock adressé par slug) + `CategoryController`, request DTOs `@Valid`, `CatalogExceptionHandler` (par module) + `IllegalArgumentException → 400` ajouté au `GlobalExceptionHandler` (slug d'URL mal formé).
+    - [x] **Testé manuellement via curl le 2026-06-24** : les 16 endpoints (auth + catégories + produits + stock) validés de bout en bout sur base vierge. _Bug systémique de persistence trouvé & corrigé : toutes les opérations d'UPDATE plantaient (mappers reconstruisant une entité détachée sans recopier `created_at` ni `@Version` → `NOT NULL violation` et `StaleObjectStateException` au merge). Mappers Category/Product/ProductStock corrigés. Mapping d'exceptions complété : `IllegalProductStatusTransition`→409, `ObjectOptimisticLockingFailure`→409._
     7. [ ] **Sécurité (prochaine session)** : règles d'accès `ADMIN` ajoutées au `SecurityConfig` existant (écriture `ADMIN`, lecture publique).
     8. [ ] **Pagination (prochaine session)** : listings `GET /products` / `GET /categories` paginés (cf. CQRS / projections de lecture).
 - [ ] `cart` module: add/remove items, price snapshot, promo rules
@@ -260,7 +264,7 @@ Tables are under: **the_shop → Schemas → public → Tables**
 
 ## Database Schema
 
-All tables use `UUID` primary keys generated by PostgreSQL (`gen_random_uuid()` via the `pgcrypto` extension). Monetary values use `NUMERIC(10, 2)` — never `FLOAT`. All timestamps are `TIMESTAMP WITH TIME ZONE`.
+All tables use `UUID` primary keys. The UUID is generated by the **application** in the domain layer (factories call `UUID.randomUUID()`), so identity is a domain concern, not a database one. The SQL `DEFAULT gen_random_uuid()` is kept as a safety net but is never exercised in practice. Monetary values use `NUMERIC(10, 2)` — never `FLOAT`. All timestamps are `TIMESTAMP WITH TIME ZONE`.
 
 ### `user` module
 
@@ -281,6 +285,7 @@ All tables use `UUID` primary keys generated by PostgreSQL (`gen_random_uuid()` 
 | `token` | VARCHAR UNIQUE | opaque token |
 | `expires_at` | TIMESTAMPTZ | |
 | `revoked` | BOOLEAN | explicit revocation before expiry |
+| `created_at` | TIMESTAMPTZ | issued-at timestamp |
 
 ---
 

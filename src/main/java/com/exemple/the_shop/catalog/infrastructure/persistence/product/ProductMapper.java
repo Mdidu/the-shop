@@ -17,6 +17,8 @@ public final class ProductMapper {
     entity.setPrice(product.getPrice().amount());
     entity.setSlug(product.getSlug().value());
     entity.setStatus(product.getStatus());
+    entity.setVersion(product.getVersion());
+    entity.setCreatedAt(product.getCreatedAt());
     return entity;
   }
 

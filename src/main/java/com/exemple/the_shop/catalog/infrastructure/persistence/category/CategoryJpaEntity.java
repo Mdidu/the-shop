@@ -66,8 +66,14 @@ public class CategoryJpaEntity {
     return createdAt;
   }
 
+  public void setCreatedAt(Instant createdAt) {
+    this.createdAt = createdAt;
+  }
+
   @PrePersist
   protected void onCreate() {
-    createdAt = Instant.now();
+    if (createdAt == null) {
+      createdAt = Instant.now();
+    }
   }
 }

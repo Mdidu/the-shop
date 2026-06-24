@@ -1,4 +1,5 @@
 package com.exemple.the_shop.user.application.auth;
+
 import com.exemple.the_shop.user.application.token.RefreshTokenService;
 
 import org.springframework.security.authentication.BadCredentialsException;
@@ -50,6 +51,15 @@ public class AuthService {
     RefreshToken refreshToken = refreshTokenService.issue(user.getId());
     String accessToken = jwtUtil.generateAccessToken(user.getId(), user.getRole().name());
     return new AuthResponse(accessToken, refreshToken.getToken());
+  }
+
+  @Transactional
+  public AuthResponse refresh(String presentedRefreshToken) {
+    RefreshToken rotated = refreshTokenService.rotate(presentedRefreshToken);
+    User user = userRepository.findById(rotated.getUserId())
+        .orElseThrow(() -> new BadCredentialsException("Invalid credentials"));
+    String accessToken = jwtUtil.generateAccessToken(user.getId(), user.getRole().name());
+    return new AuthResponse(accessToken, rotated.getToken());
   }
 
   @Transactional

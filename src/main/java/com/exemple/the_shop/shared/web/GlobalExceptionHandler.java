@@ -8,7 +8,9 @@ import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -56,6 +58,21 @@ public class GlobalExceptionHandler {
   public ResponseEntity<ApiError> handleIllegalArgument(IllegalArgumentException ex) {
     return ResponseEntity.badRequest()
         .body(ApiError.of(HttpStatus.BAD_REQUEST, ex.getMessage()));
+  }
+
+  /** Méthode HTTP non supportée par la route (ex. GET sur un endpoint POST) → 405. */
+  @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+  public ResponseEntity<ApiError> handleMethodNotSupported(HttpRequestMethodNotSupportedException ex) {
+    return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
+        .body(ApiError.of(HttpStatus.METHOD_NOT_ALLOWED, ex.getMessage()));
+  }
+
+  /** Écriture concurrente sur une entité versionnée (@Version) → conflit. */
+  @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+  public ResponseEntity<ApiError> handleOptimisticLock(ObjectOptimisticLockingFailureException ex) {
+    return ResponseEntity.status(HttpStatus.CONFLICT)
+        .body(ApiError.of(HttpStatus.CONFLICT,
+            "La ressource a été modifiée entre-temps, réessayez."));
   }
 
   /** Filet de sécurité : tout le reste → 500, sans fuiter le détail au client. */
