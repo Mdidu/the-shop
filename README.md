@@ -174,7 +174,8 @@ The payment endpoint and the "place order" endpoint accept an `Idempotency-Key` 
        - **Décidé** : hiérarchie `Category` = arbre via `parent_id` ; `moveCategory` interdit le self-parent (domaine) et les cycles indirects (`assertNoCycle` remonte les ancêtres dans le service).
     6. [x] Web : `ProductController` (UN seul controller pour produit + stock, stock adressé par slug) + `CategoryController`, request DTOs `@Valid`, `CatalogExceptionHandler` (par module) + `IllegalArgumentException → 400` ajouté au `GlobalExceptionHandler` (slug d'URL mal formé).
     - [x] **Testé manuellement via curl le 2026-06-24** : les 16 endpoints (auth + catégories + produits + stock) validés de bout en bout sur base vierge. _Bug systémique de persistence trouvé & corrigé : toutes les opérations d'UPDATE plantaient (mappers reconstruisant une entité détachée sans recopier `created_at` ni `@Version` → `NOT NULL violation` et `StaleObjectStateException` au merge). Mappers Category/Product/ProductStock corrigés. Mapping d'exceptions complété : `IllegalProductStatusTransition`→409, `ObjectOptimisticLockingFailure`→409._
-    7. [ ] **Sécurité (prochaine session)** : règles d'accès `ADMIN` ajoutées au `SecurityConfig` existant (écriture `ADMIN`, lecture publique).
+    7. [x] **Sécurité** : règles d'accès ajoutées au `SecurityConfig` (matchers par méthode HTTP, dans l'ordre) — `GET /products/**` & `GET /categories/**` publics, toute autre écriture catalog `hasRole("ADMIN")`, `anyRequest().authenticated()` en filet. Écriture = `ADMIN` seul (le rôle `SELLER` sera traité plus tard). Refus rendus en `ApiError` via `RestAuthenticationEntryPoint` (401) + `RestAccessDeniedHandler` (403) câblés sur `.exceptionHandling(...)` — nécessaires car le refus survient dans la chaîne de filtres, hors de portée du `@RestControllerAdvice`. _⚠️ Le slash initial des patterns (`/products/**`) est obligatoire : sans lui, le matcher ne couvre pas le path et l'écriture retombe sur `authenticated()` → faille fail-open silencieuse._
+    - [x] **Testé manuellement via curl le 2026-06-26** (script `scripts/catalog-security-smoke.sh`, base vierge) : **21/21** — 16 endpoints fonctionnels (écritures `ADMIN`, lectures publiques) + matrice de sécurité (GET public→200, écriture sans token→401, écriture `CUSTOMER`→403, écriture `ADMIN`→201), corps `ApiError` vérifiés. _Promotion `ADMIN` par `UPDATE` en base (aucun endpoint ne crée d'`ADMIN`) + re-signin obligatoire (rôle figé dans le JWT). Piège Boot 4 / Jackson 3 levé : injecter `tools.jackson.databind.ObjectMapper` (le `com.fasterxml…` de jjwt n'a pas de bean)._
     8. [ ] **Pagination (prochaine session)** : listings `GET /products` / `GET /categories` paginés (cf. CQRS / projections de lecture).
 - [ ] `cart` module: add/remove items, price snapshot, promo rules
 - [ ] `order` module: state machine, place order use case
@@ -227,6 +228,16 @@ SPRING_PROFILES_ACTIVE=dev ./mvnw spring-boot:run
 ```
 
 Flyway runs automatically on startup and applies any pending migrations.
+
+### Smoke test du module catalog (auth + sécurité)
+
+Avec l'infra et l'application démarrées, le script rejoue de bout en bout les 16 endpoints du catalog et la matrice de sécurité (lecture publique / écriture `ADMIN`) :
+
+```bash
+bash scripts/catalog-security-smoke.sh
+```
+
+⚠️ Il **vide** les tables `users`/catalog au démarrage (repart d'une base propre). Nécessite `jq` et `docker`. Sortie : compteur `PASS/FAIL` + exit code 0 si tout est vert.
 
 ### Start everything including the backend in Docker
 
