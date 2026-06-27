@@ -10,14 +10,19 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.exemple.the_shop.catalog.application.product.ProductListItem;
+import com.exemple.the_shop.catalog.application.product.ProductListQuery;
+import com.exemple.the_shop.catalog.application.product.ProductQueryService;
 import com.exemple.the_shop.catalog.application.product.ProductResponse;
 import com.exemple.the_shop.catalog.application.product.ProductService;
 import com.exemple.the_shop.catalog.application.stock.ProductStockResponse;
 import com.exemple.the_shop.catalog.application.stock.ProductStockService;
 import com.exemple.the_shop.catalog.application.product.UpdateProductCommand;
 import com.exemple.the_shop.catalog.domain.model.Product;
+import com.exemple.the_shop.shared.application.PageResponse;
 import com.exemple.the_shop.shared.domain.Money;
 import com.exemple.the_shop.shared.domain.Slug;
 
@@ -29,10 +34,13 @@ public class ProductController {
 
   private final ProductService productService;
   private final ProductStockService productStockService;
+  private final ProductQueryService productQueryService;
 
-  public ProductController(ProductService productService, ProductStockService productStockService) {
+  public ProductController(ProductService productService, ProductStockService productStockService,
+      ProductQueryService productQueryService) {
     this.productService = productService;
     this.productStockService = productStockService;
+    this.productQueryService = productQueryService;
   }
 
   @PostMapping
@@ -40,6 +48,17 @@ public class ProductController {
     Product product = Product.create(request.name(), request.description(), request.categoryId(),
         Money.of(request.price()));
     return ResponseEntity.status(HttpStatus.CREATED).body(productService.createProduct(product));
+  }
+
+  /** Listing public paginé : produits ACTIVE uniquement. */
+  @GetMapping
+  public ResponseEntity<PageResponse<ProductListItem>> list(
+      @RequestParam(required = false) Integer page,
+      @RequestParam(required = false) Integer size,
+      @RequestParam(required = false) String sort,
+      @RequestParam(required = false) String category) {
+    ProductListQuery query = ProductListQueryFactory.from(page, size, sort, category);
+    return ResponseEntity.ok(productQueryService.listActiveProducts(query));
   }
 
   @GetMapping("/{slug}")

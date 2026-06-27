@@ -108,7 +108,22 @@ This means migrating to Kafka in Phase 3 only touches the infrastructure layer. 
 
 ### CQRS (lightweight)
 
-Write operations go through rich domain aggregates. Read operations (listings, order history, admin views) bypass the domain and hit optimized query projections directly. This avoids loading full aggregates just to render a table.
+Write operations go through rich domain aggregates. Read operations (listings, order history, admin views) bypass the domain and hit optimized query projections directly. This avoids loading full aggregates just to render a table, and sidesteps the N+1 that fetching related data (category name, stock availability…) through aggregates would cause.
+
+**Port placement is deliberately asymmetric between the two sides:**
+
+| | Write side | Read side |
+|---|---|---|
+| Port location | `domain/port/out` | `application` |
+| Returns | domain aggregate (`Product`) | flat read model DTO (`ProductListItem`) |
+| Spring Data repo | `JpaRepository` (full CRUD) | `Repository` (only the query method) |
+
+A write port belongs in the domain because it returns aggregates — domain depending on domain. A **read port does not**: it returns a projection shaped by the UI, which is an *application* concern, not a domain concept. Placing it in `domain/port/out` would force the domain to depend on an application DTO — an inverted dependency. So read ports live in `application`, next to the read model they return. This asymmetry is intentional, not an inconsistency: it follows the dependency rule rather than visual symmetry.
+
+Concrete example — the catalog product listing (`GET /products`, `GET /admin/products`):
+- `ProductListItem` (read model) + `ProductQueryRepository` (read port) live in `application`. The read model carries only what a list row renders (slug, name, price, category name/slug, an `inStock` boolean derived in SQL, status) — never the internal UUID, never the raw stock quantity.
+- `ProductListingJpaRepository` (a Spring Data `Repository`, **not** `JpaRepository`, so the read side inherits no write methods) plus its adapter live in `infrastructure/persistence`.
+- Spring's `Pageable` / `Page` / `Sort` are confined to that adapter. The layers above speak a home-grown `PageResponse<T>` and `ProductListQuery`, so no Spring Data pagination type leaks upward. Sortable fields are whitelisted (an enum), which is also the injection guard on the `ORDER BY`.
 
 ### Optimistic Locking on Stock
 
@@ -176,7 +191,9 @@ The payment endpoint and the "place order" endpoint accept an `Idempotency-Key` 
     - [x] **Testé manuellement via curl le 2026-06-24** : les 16 endpoints (auth + catégories + produits + stock) validés de bout en bout sur base vierge. _Bug systémique de persistence trouvé & corrigé : toutes les opérations d'UPDATE plantaient (mappers reconstruisant une entité détachée sans recopier `created_at` ni `@Version` → `NOT NULL violation` et `StaleObjectStateException` au merge). Mappers Category/Product/ProductStock corrigés. Mapping d'exceptions complété : `IllegalProductStatusTransition`→409, `ObjectOptimisticLockingFailure`→409._
     7. [x] **Sécurité** : règles d'accès ajoutées au `SecurityConfig` (matchers par méthode HTTP, dans l'ordre) — `GET /products/**` & `GET /categories/**` publics, toute autre écriture catalog `hasRole("ADMIN")`, `anyRequest().authenticated()` en filet. Écriture = `ADMIN` seul (le rôle `SELLER` sera traité plus tard). Refus rendus en `ApiError` via `RestAuthenticationEntryPoint` (401) + `RestAccessDeniedHandler` (403) câblés sur `.exceptionHandling(...)` — nécessaires car le refus survient dans la chaîne de filtres, hors de portée du `@RestControllerAdvice`. _⚠️ Le slash initial des patterns (`/products/**`) est obligatoire : sans lui, le matcher ne couvre pas le path et l'écriture retombe sur `authenticated()` → faille fail-open silencieuse._
     - [x] **Testé manuellement via curl le 2026-06-26** (script `scripts/catalog-security-smoke.sh`, base vierge) : **21/21** — 16 endpoints fonctionnels (écritures `ADMIN`, lectures publiques) + matrice de sécurité (GET public→200, écriture sans token→401, écriture `CUSTOMER`→403, écriture `ADMIN`→201), corps `ApiError` vérifiés. _Promotion `ADMIN` par `UPDATE` en base (aucun endpoint ne crée d'`ADMIN`) + re-signin obligatoire (rôle figé dans le JWT). Piège Boot 4 / Jackson 3 levé : injecter `tools.jackson.databind.ObjectMapper` (le `com.fasterxml…` de jjwt n'a pas de bean)._
-    8. [ ] **Pagination (prochaine session)** : listings `GET /products` / `GET /categories` paginés (cf. CQRS / projections de lecture).
+    8. [x] **Pagination** des listings produit (cf. CQRS / projections de lecture — read model, port de lecture en `application`, adapter confinant `Pageable`/`Page`, wrapper maison `PageResponse<T>`).
+       - [x] `GET /products` (public, ACTIVE only) + `GET /admin/products` (tous statuts, `/admin/**` → `hasRole("ADMIN")`) — paginés, filtre par catégorie, tri whitelisté (`name`/`price`), `inStock` dérivé en SQL. **Testé via curl le 2026-06-27** (script `scripts/catalog-pagination-smoke.sh`, base vierge) : **30/30** — visibilité public/admin, filtre, tri (+ rejet 400 hors whitelist = garde anti-injection sur l'`ORDER BY`), clamp du `size` (0→20, 400→100), pagination + tie-breaker stable, sécurité 401/403/200. _3 risques JPQL levés au runtime : entity joins `ON`, `CASE` booléen, tri sur l'alias racine malgré les jointures._
+       - **Décidé** : `GET /categories` **NON paginé**. Paginer un arbre de catégories (peu nombreuses, hiérarchiques) est artificiel — le besoin réel est de renvoyer l'arbre, pas une page plate. À reconsidérer seulement si le volume l'exige un jour.
 - [ ] `cart` module: add/remove items, price snapshot, promo rules
 - [ ] `order` module: state machine, place order use case
 - [ ] `payment` module: simulated capture, idempotency
