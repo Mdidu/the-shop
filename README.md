@@ -75,7 +75,7 @@ Authentication and identity. Issues JWT access tokens and refresh tokens. Roles:
 Products, categories, and stock levels. Stock is managed with **optimistic locking** to handle concurrent purchases without pessimistic locks degrading throughput.
 
 ### `cart`
-Persisted shopping cart (not session-based). Applies promotion rules at item level. Recalculates totals on every modification. Cart items hold a snapshot of the price at time of addition — not a live reference.
+Persisted shopping cart (one per user, not session-based). Created lazily on first `addItem`. The **product is the source of truth for price**: totals are recalculated from the live catalog price on every read. `cart_items.unit_price` is only a decorative "last known price" — the price is frozen for good at checkout (`order_items`), not in the cart. The cart reserves no stock; concurrency on the last unit is arbitrated at checkout.
 
 ### `order`
 The richest module. An order moves through a strict state machine:
@@ -194,7 +194,18 @@ The payment endpoint and the "place order" endpoint accept an `Idempotency-Key` 
     8. [x] **Pagination** des listings produit (cf. CQRS / projections de lecture — read model, port de lecture en `application`, adapter confinant `Pageable`/`Page`, wrapper maison `PageResponse<T>`).
        - [x] `GET /products` (public, ACTIVE only) + `GET /admin/products` (tous statuts, `/admin/**` → `hasRole("ADMIN")`) — paginés, filtre par catégorie, tri whitelisté (`name`/`price`), `inStock` dérivé en SQL. **Testé via curl le 2026-06-27** (script `scripts/catalog-pagination-smoke.sh`, base vierge) : **30/30** — visibilité public/admin, filtre, tri (+ rejet 400 hors whitelist = garde anti-injection sur l'`ORDER BY`), clamp du `size` (0→20, 400→100), pagination + tie-breaker stable, sécurité 401/403/200. _3 risques JPQL levés au runtime : entity joins `ON`, `CASE` booléen, tri sur l'alias racine malgré les jointures._
        - **Décidé** : `GET /categories` **NON paginé**. Paginer un arbre de catégories (peu nombreuses, hiérarchiques) est artificiel — le besoin réel est de renvoyer l'arbre, pas une page plate. À reconsidérer seulement si le volume l'exige un jour.
-- [ ] `cart` module: add/remove items, price snapshot, promo rules
+- [ ] `cart` module: add/remove items, live pricing, checkout → order
+  - **Décidé** : **un panier persistant par user** (pas de panier invité/session). Création = **lazy get-or-create au 1er `addItem`** (`findByUserId(u).orElseGet(create)`), **zéro couplage** avec l'inscription — un user sans panier est rattrapable (`GET /cart` → panier vide `200`), donc le cart n'est pas un invariant à créer au signup (rollback du compte parce que le cart plante = absurde).
+  - **Décidé** : **le produit fait autorité sur le prix**. `GET /cart` relit le prix vivant du catalog (read model, JOIN) et recalcule le total à la lecture. `cart_items.unit_price` est **décoratif** (« dernier prix connu », utile pour un futur badge « prix changé »), PAS la source de vérité. Le prix ne se fige **définitivement qu'au checkout** (`order_items.unit_price`, module `order`) : le panier reflète le catalogue, la commande est le contrat.
+  - **Décidé** : le panier **ne réserve aucun stock** (`carts`/`cart_items` n'ont ni lien `product_stock` ni `@Version`). La concurrence sur le dernier exemplaire est arbitrée au **checkout** (décrément + `@Version` côté `order`).
+  - **Décidé** : **vrai agrégat `@OneToMany`** — `Cart` est la racine qui tient sa `List<CartItem>` ; `CartItem` n'a pas de repo propre. Contraste avec catalog (`Product`/`ProductStock` = deux agrégats distincts, d'où le style flat là-bas). C'est la 1re association JPA du projet.
+  - Ordre d'attaque (bottom-up) :
+    1. [x] Domaine `Cart` + `CartItem` : classes immuables, invariant `quantity > 0` dans le constructeur, factory `create`, transitions immuables **conservant l'`id`** de la ligne (`increaseQuantity`/`withQuantity` — clé pour qu'Hibernate reconnaisse la ligne au save). `addItem` merge par `productId` (traduit `UNIQUE(cart_id, product_id)` en règle métier). `removeItem`/`updateItemQuantity` → `CartItemNotFoundException` si absent. `isEmpty`.
+    2. [x] Port `CartRepository` (`findByUserId`/`save`). Pas de `CartItemRepository` (CartItem n'est pas un aggregate root → un repo par racine).
+    3. [x] Persistence : `CartJpaEntity` (`@OneToMany(cascade=ALL, orphanRemoval=true)` **unidirectionnel** + `@JoinColumn(name="cart_id", nullable=false)` — le `nullable=false` tue l'UPDATE parasite des unidirectionnelles), `CartItemJpaEntity` (pas de back-ref `cart`, fidèle au domaine), `CartJpaRepository`, `CartMapper`, `CartRepositoryImpl`. Timestamps générés en Java (`@PrePersist`/`@PreUpdate`). Compile OK.
+       - **Stratégie `save` = load-and-mutate** (≠ « build fresh + merge » de catalog, inadapté à un agrégat `@OneToMany`/`orphanRemoval`) : `findById` absent → cart neuf → INSERT ; présent → **synchro par id** sur l'entity managée, en **mutant la collection en place** (`add`/`removeIf` sur le `PersistentBag` suivi) → id présent = UPDATE quantité ciblé (`created_at` préservé), id nouveau = INSERT, id disparu = DELETE orphelin. ⚠️ Impose que `CartService` soit `@Transactional` (dirty checking, flush au commit — l'entity managée serait détachée sinon).
+    4. [ ] Application : `CartService` (`@Transactional`) + `CartResponse`/`CartItemResponse`. **À trancher** : comment `cart` **lit** `catalog` (prix + existence + statut `ACTIVE` du produit) → port dédié côté cart vs réutilisation d'un service/query catalog.
+    5. [ ] Web : `CartController` + `CartExceptionHandler` (par module) + règles de sécurité.
 - [ ] `order` module: state machine, place order use case
 - [ ] `payment` module: simulated capture, idempotency
 - [ ] `notification` module: event-driven email simulation
@@ -363,7 +374,7 @@ Stock lives in its own table so that decrementing quantity during order confirma
 | `cart_id` | UUID FK → carts | cascade delete |
 | `product_id` | UUID FK → products | |
 | `quantity` | INTEGER > 0 | |
-| `unit_price` | NUMERIC(10,2) | **price snapshot at time of addition** — not the live product price |
+| `unit_price` | NUMERIC(10,2) | decorative "last known price" at time of addition — **not authoritative**; `GET /cart` re-reads the live product price. The price is frozen for good only at checkout (`order_items.unit_price`). |
 
 `(cart_id, product_id)` has a UNIQUE constraint — adding the same product twice increases quantity, it does not create a second row.
 
