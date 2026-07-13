@@ -80,6 +80,10 @@ public class Cart {
     return new Cart(id, userId, updated, createdAt, updatedAt);
   }
 
+  public Cart clear() {
+    return new Cart(id, userId, List.of(), createdAt, updatedAt);
+  }
+
   public boolean isEmpty() {
     return items.isEmpty();
   }

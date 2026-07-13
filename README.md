@@ -75,7 +75,7 @@ Authentication and identity. Issues JWT access tokens and refresh tokens. Roles:
 Products, categories, and stock levels. Stock is managed with **optimistic locking** to handle concurrent purchases without pessimistic locks degrading throughput.
 
 ### `cart`
-Persisted shopping cart (one per user, not session-based). Created lazily on first `addItem`. The **product is the source of truth for price**: totals are recalculated from the live catalog price on every read. `cart_items.unit_price` is only a decorative "last known price" — the price is frozen for good at checkout (`order_items`), not in the cart. The cart reserves no stock; concurrency on the last unit is arbitrated at checkout.
+Persisted shopping cart (one per user, not session-based). Created lazily on first `addItem` (get-or-create). Reads the catalog through a dedicated **outbound inter-module port** (`ProductCatalogPort`) implemented by an anti-corruption adapter — the cart never touches the catalog's internals directly. The **product is designed to be the source of truth for price**: `cart_items.unit_price` is only a decorative "last known price", and the price is frozen for good at checkout (`order_items`), not in the cart. Re-reading the *live* catalog price on every `GET /cart` is **deliberately deferred** until there's a real trigger (time-boxed promos, or a checkout price preview) — for now the cart displays the stored price. The cart reserves no stock; concurrency on the last unit is arbitrated at checkout.
 
 ### `order`
 The richest module. An order moves through a strict state machine:
@@ -194,7 +194,7 @@ The payment endpoint and the "place order" endpoint accept an `Idempotency-Key` 
     8. [x] **Pagination** des listings produit (cf. CQRS / projections de lecture — read model, port de lecture en `application`, adapter confinant `Pageable`/`Page`, wrapper maison `PageResponse<T>`).
        - [x] `GET /products` (public, ACTIVE only) + `GET /admin/products` (tous statuts, `/admin/**` → `hasRole("ADMIN")`) — paginés, filtre par catégorie, tri whitelisté (`name`/`price`), `inStock` dérivé en SQL. **Testé via curl le 2026-06-27** (script `scripts/catalog-pagination-smoke.sh`, base vierge) : **30/30** — visibilité public/admin, filtre, tri (+ rejet 400 hors whitelist = garde anti-injection sur l'`ORDER BY`), clamp du `size` (0→20, 400→100), pagination + tie-breaker stable, sécurité 401/403/200. _3 risques JPQL levés au runtime : entity joins `ON`, `CASE` booléen, tri sur l'alias racine malgré les jointures._
        - **Décidé** : `GET /categories` **NON paginé**. Paginer un arbre de catégories (peu nombreuses, hiérarchiques) est artificiel — le besoin réel est de renvoyer l'arbre, pas une page plate. À reconsidérer seulement si le volume l'exige un jour.
-- [ ] `cart` module: add/remove items, live pricing, checkout → order
+- [x] `cart` module: add/remove/update items, persistent get-or-create cart *(code-complete, testé manuellement via curl le 2026-07-13 — 31/31 ; live pricing volontairement reporté au checkout)*
   - **Décidé** : **un panier persistant par user** (pas de panier invité/session). Création = **lazy get-or-create au 1er `addItem`** (`findByUserId(u).orElseGet(create)`), **zéro couplage** avec l'inscription — un user sans panier est rattrapable (`GET /cart` → panier vide `200`), donc le cart n'est pas un invariant à créer au signup (rollback du compte parce que le cart plante = absurde).
   - **Décidé** : **le produit fait autorité sur le prix**. `GET /cart` relit le prix vivant du catalog (read model, JOIN) et recalcule le total à la lecture. `cart_items.unit_price` est **décoratif** (« dernier prix connu », utile pour un futur badge « prix changé »), PAS la source de vérité. Le prix ne se fige **définitivement qu'au checkout** (`order_items.unit_price`, module `order`) : le panier reflète le catalogue, la commande est le contrat.
   - **Décidé** : le panier **ne réserve aucun stock** (`carts`/`cart_items` n'ont ni lien `product_stock` ni `@Version`). La concurrence sur le dernier exemplaire est arbitrée au **checkout** (décrément + `@Version` côté `order`).
@@ -204,8 +204,9 @@ The payment endpoint and the "place order" endpoint accept an `Idempotency-Key` 
     2. [x] Port `CartRepository` (`findByUserId`/`save`). Pas de `CartItemRepository` (CartItem n'est pas un aggregate root → un repo par racine).
     3. [x] Persistence : `CartJpaEntity` (`@OneToMany(cascade=ALL, orphanRemoval=true)` **unidirectionnel** + `@JoinColumn(name="cart_id", nullable=false)` — le `nullable=false` tue l'UPDATE parasite des unidirectionnelles), `CartItemJpaEntity` (pas de back-ref `cart`, fidèle au domaine), `CartJpaRepository`, `CartMapper`, `CartRepositoryImpl`. Timestamps générés en Java (`@PrePersist`/`@PreUpdate`). Compile OK.
        - **Stratégie `save` = load-and-mutate** (≠ « build fresh + merge » de catalog, inadapté à un agrégat `@OneToMany`/`orphanRemoval`) : `findById` absent → cart neuf → INSERT ; présent → **synchro par id** sur l'entity managée, en **mutant la collection en place** (`add`/`removeIf` sur le `PersistentBag` suivi) → id présent = UPDATE quantité ciblé (`created_at` préservé), id nouveau = INSERT, id disparu = DELETE orphelin. ⚠️ Impose que `CartService` soit `@Transactional` (dirty checking, flush au commit — l'entity managée serait détachée sinon).
-    4. [ ] Application : `CartService` (`@Transactional`) + `CartResponse`/`CartItemResponse`. **À trancher** : comment `cart` **lit** `catalog` (prix + existence + statut `ACTIVE` du produit) → port dédié côté cart vs réutilisation d'un service/query catalog.
-    5. [ ] Web : `CartController` + `CartExceptionHandler` (par module) + règles de sécurité.
+    4. [x] Application : `CartService` (5 méthodes `@Transactional`) + `CartResponse`/`CartItemResponse`. **Tranché** : `cart` lit `catalog` via un **port sortant inter-module dédié** — `ProductCatalogPort` (`findProduct(id) → Optional<ProductSnapshot>`, `ProductSnapshot` = `productId` + `price` + `isActive`) implémenté par un adaptateur dans `cart/infrastructure/catalog/` qui appelle le `ProductRepository` du catalog. **Anti-corruption layer** : cart ne dépend que d'une interface qu'il possède ; seul l'adaptateur connaît le catalog (1er port *inter-module* du projet, vs les ports de persistence précédents). `addItem` valide le produit (introuvable → `ProductNotFoundException`, inactif → `ProductNotAvailableException`) **puis** get-or-create ; le prix vient du serveur, jamais du body. `updateQuantity`/`removeItem` sont **purement domaine** (aucun appel port : le statut produit est arbitré au checkout, pas au panier). `Cart.clear()` ajouté au domaine — la suppression réelle des lignes est le job du repo (`orphanRemoval`), pas du service.
+    5. [x] Web : `CartController` — 5 endpoints sur la ressource **singleton** `/cart` (pas de cartId en URL, `userId` lu du JWT via `@AuthenticationPrincipal`), tous en `200` + `CartResponse` (les `DELETE` renvoient le panier à jour). Request DTOs `@Valid` (`AddItemRequest`, `UpdateQuantityRequest`). `CartExceptionHandler` (par module) : `CartItemNotFoundException` → 404, `ProductNotFoundException` → 404, `ProductNotAvailableException` → 409 ; la validation `@Valid` et l'`IllegalArgumentException` du domaine (quantité ≤ 0) restent au `GlobalExceptionHandler` (400). Sécurité : `/cart/**` tombe sous `.anyRequest().authenticated()`, rien à ajouter.
+    - [x] **Testé manuellement via curl le 2026-07-13** (script `scripts/cart-smoke.sh`, base vierge) : **31/31** — parcours nominal (panier vide → add → merge `2+1=3` → get → `PUT` qty 5 → remove → clear) avec recalcul du total (`lineTotal` + `total`), et cas d'erreur (produit inexistant 404, produit `DRAFT`/inactif 409, quantité 0 → 400, ligne absente en PUT/DELETE 404, sans token 401).
 - [ ] `order` module: state machine, place order use case
 - [ ] `payment` module: simulated capture, idempotency
 - [ ] `notification` module: event-driven email simulation
@@ -266,6 +267,16 @@ bash scripts/catalog-security-smoke.sh
 ```
 
 ⚠️ Il **vide** les tables `users`/catalog au démarrage (repart d'une base propre). Nécessite `jq` et `docker`. Sortie : compteur `PASS/FAIL` + exit code 0 si tout est vert.
+
+### Smoke test du module cart
+
+Rejoue le parcours panier de bout en bout (comme customer authentifié) + les cas d'erreur métier :
+
+```bash
+bash scripts/cart-smoke.sh
+```
+
+Couvre : panier vide → add → merge → get → update (`PUT`) → remove → clear avec recalcul du total, puis produit inexistant (404), produit inactif (409), quantité 0 (400), ligne absente (404), sans token (401). ⚠️ **vide** les tables `users`/catalog/`carts`/`cart_items` au démarrage. Nécessite `jq` et `docker`.
 
 ### Start everything including the backend in Docker
 
@@ -374,7 +385,7 @@ Stock lives in its own table so that decrementing quantity during order confirma
 | `cart_id` | UUID FK → carts | cascade delete |
 | `product_id` | UUID FK → products | |
 | `quantity` | INTEGER > 0 | |
-| `unit_price` | NUMERIC(10,2) | decorative "last known price" at time of addition — **not authoritative**; `GET /cart` re-reads the live product price. The price is frozen for good only at checkout (`order_items.unit_price`). |
+| `unit_price` | NUMERIC(10,2) | decorative "last known price" at time of addition — **not authoritative**. Re-reading the live product price on `GET /cart` is designed but deferred; the price is frozen for good only at checkout (`order_items.unit_price`). |
 
 `(cart_id, product_id)` has a UNIQUE constraint — adding the same product twice increases quantity, it does not create a second row.
 
